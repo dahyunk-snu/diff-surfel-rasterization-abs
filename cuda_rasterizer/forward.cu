@@ -180,6 +180,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const int W, int H,
 	const float tan_fovx, const float tan_fovy,
 	const float focal_x, const float focal_y,
+	const float cx, const float cy,
 	int* radii,
 	float2* points_xy_image,
 	float* depths,
@@ -205,7 +206,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
 	
-	float4 intrins = {focal_x, focal_y, float(W)/2.0, float(H)/2.0};
+	float4 intrins = {focal_x, focal_y, cx, cy};
 	glm::vec2 scale = scales[idx];
 	glm::vec4 quat = rotations[idx];
 	
@@ -514,6 +515,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	const int W, const int H,
 	const float focal_x, const float focal_y,
 	const float tan_fovx, const float tan_fovy,
+	const float cx, const float cy,
 	int* radii,
 	float2* means2D,
 	float* depths,
@@ -541,6 +543,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		W, H,
 		tan_fovx, tan_fovy,
 		focal_x, focal_y,
+		cx, cy,
 		radii,
 		means2D,
 		depths,

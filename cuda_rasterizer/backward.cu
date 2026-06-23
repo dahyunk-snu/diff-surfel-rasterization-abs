@@ -556,6 +556,8 @@ __global__ void preprocessCUDA(
 	const float focal_y,
 	const float tan_fovx,
 	const float tan_fovy,
+	const float cx,
+	const float cy,
 	const glm::vec3* campos, 
 	// grad input
 	const float* dL_dtransMats,
@@ -576,7 +578,7 @@ __global__ void preprocessCUDA(
 	const float* dL_dnormal3D = &(dL_dnormal3Ds[3 * idx]);
 
 	glm::vec3 p_world = glm::vec3(means3D[idx].x, means3D[idx].y, means3D[idx].z);
-	float4 intrins = {focal_x, focal_y, focal_x * tan_fovx, focal_y * tan_fovy};
+	float4 intrins = {focal_x, focal_y, cx, cy};
 
 	glm::vec3 dL_dmean3D;
 	glm::vec2 dL_dscale;
@@ -759,6 +761,7 @@ void BACKWARD::preprocess(
 	const float* projmatrix,
 	const float focal_x, const float focal_y,
 	const float tan_fovx, const float tan_fovy,
+	const float cx, const float cy,
 	const float* R_cam_to_view,
 	const float* dist_params,
 	const glm::vec3* campos, 
@@ -778,8 +781,8 @@ void BACKWARD::preprocess(
 	// propagate gradients to transMat
 
 	// we do not use the center actually
-	float W = focal_x * tan_fovx;
-	float H = focal_y * tan_fovy;
+	float W = focal_x;
+	float H = focal_y;
 	computeAABB << <(P + 255) / 256, 256 >> >(
 		P,
 		radii,
@@ -809,6 +812,8 @@ void BACKWARD::preprocess(
 		focal_y,
 		tan_fovx,
 		tan_fovy,
+		cx,
+		cy,
 		campos,	
 		dL_dtransMats,
 		dL_dnormal3Ds,

@@ -24,7 +24,7 @@
 #include <string>
 #include <functional>
 
-#define CHECK_INPUT(x)											\               
+#define CHECK_INPUT(x)											\
 	AT_ASSERTM(x.type().is_cuda(), #x " must be a CUDA tensor")
 	// AT_ASSERTM(x.is_contiguous(), #x " must be contiguous")
 
@@ -50,6 +50,8 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& projmatrix,
 	const float tan_fovx, 
 	const float tan_fovy,
+	const float cx,
+	const float cy,
 	const int image_height,
 	const int image_width,
 	const torch::Tensor& sh,
@@ -131,6 +133,8 @@ RasterizeGaussiansCUDA(
 		campos.contiguous().data<float>(),
 		tan_fovx,
 		tan_fovy,
+		cx,
+		cy,
 		prefiltered,
 		out_color.contiguous().data<float>(),
 		out_others.contiguous().data<float>(),
@@ -154,6 +158,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& projmatrix,
 	const float tan_fovx,
 	const float tan_fovy,
+	const float cx,
+	const float cy,
 	const torch::Tensor& R_cam_to_view,
 	const torch::Tensor& dist_params,
 	const torch::Tensor& dL_dout_color,
@@ -222,6 +228,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  campos.contiguous().data<float>(),
 	  tan_fovx,
 	  tan_fovy,
+	  cx,
+	  cy,
 	  R_cam_to_view.contiguous().data<float>(),
 	  dist_params.contiguous().data<float>(),
 	  radii.contiguous().data<int>(),
