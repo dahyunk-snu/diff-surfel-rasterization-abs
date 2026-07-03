@@ -157,6 +157,247 @@ __forceinline__ __device__ float3 crossProduct(float3 a, float3 b) {
     return result;
 }
 
+// ============================================================================
+// Analytic compact tile bounding (SnugBox + AccuTile) for 2D Gaussian surfels.
+//
+// Instead of a loose square box + a brute-force per-tile double loop, we bound
+// each splat by the *exact* screen-space conic of its rho3d footprint, unioned
+// with the low-pass filter disk (rho2d), and enumerate only the tiles the
+// footprint actually intersects by computing per-row tile spans in closed form.
+//
+// The preprocess (counting) and duplication (emitting) kernels both go through
+// the same inline helpers below with identical inputs, so the tile count and
+// the emitted key count are guaranteed to agree.
+// ============================================================================
+
+// Effective Mahalanobis cutoff radius (in sigmas) of a splat's footprint.
+__forceinline__ __device__ float truncatedR(float opacity)
+{
+#if TIGHTBBOX
+	// The effective extent depends on the opacity of the gaussian.
+	return sqrtf(max(9.f + logf(opacity), 0.000001f));
+#else
+	return 3.f;
+#endif
+}
+
+// Screen-space center and per-axis half-extent of the 2D Gaussian (the AABB of
+// the rho3d == 1 ellipse). See Eq. (9) in the 2DGS paper. Shared by the
+// preprocess and duplication kernels so both derive the exact same fallback.
+__forceinline__ __device__ bool computeCenterExtent(const float* transMat, float2& center, float2& extent)
+{
+	glm::mat4x3 T = glm::mat4x3(
+		transMat[0], transMat[1], transMat[2],
+		transMat[3], transMat[4], transMat[5],
+		transMat[6], transMat[7], transMat[8],
+		transMat[6], transMat[7], transMat[8]
+	);
+
+	float d = glm::dot(glm::vec3(1.0, 1.0, -1.0), T[3] * T[3]);
+	if (d == 0.0f) return false;
+	glm::vec3 f = glm::vec3(1.0, 1.0, -1.0) * (1.0f / d);
+	glm::vec3 p = glm::vec3(
+		glm::dot(f, T[0] * T[3]),
+		glm::dot(f, T[1] * T[3]),
+		glm::dot(f, T[2] * T[3]));
+	glm::vec3 h0 = p * p -
+		glm::vec3(
+			glm::dot(f, T[0] * T[0]),
+			glm::dot(f, T[1] * T[1]),
+			glm::dot(f, T[2] * T[2])
+		);
+	glm::vec3 h = sqrt(max(glm::vec3(0.0), h0)) + glm::vec3(0.0, 0.0, 1e-2);
+	center = { p.x, p.y };
+	extent = { h.x, h.y };
+	return true;
+}
+
+// Precomputed analytic bounding box for one splat.
+struct TileBBox
+{
+	uint2 rect_min;      // touched tile range [rect_min, rect_max)
+	uint2 rect_max;
+	bool  ellipse;       // true: bounded ellipse -> use per-row analytic spans
+
+	// Screen-space conic of the rho3d == trunc_R^2 footprint:
+	//   Q(x,y) = a x^2 + 2 b x y + c y^2 + 2 d x + 2 e y + f  <= 0
+	float a, b, c, d, e, f;
+	float x_lo, x_hi;        // ellipse global x-extremes (pixels)
+	float y_at_xlo, y_at_xhi;// pixel rows at which those extremes occur
+
+	// Low-pass filter disk (rho2d): center + radius.
+	float cx, cy, R_lp, R_lp2;
+};
+
+// Convert a continuous pixel-space AABB to a tile range, using the exact same
+// rounding as getRect() so the fallback path matches the original box.
+__forceinline__ __device__ void pixelBoxToTileRect(
+	float px_lo, float px_hi, float py_lo, float py_hi,
+	dim3 grid, uint2& rect_min, uint2& rect_max)
+{
+	rect_min = {
+		min(grid.x, max((int)0, (int)(px_lo / BLOCK_X))),
+		min(grid.y, max((int)0, (int)(py_lo / BLOCK_Y)))
+	};
+	rect_max = {
+		min(grid.x, max((int)0, (int)ceilf(px_hi / BLOCK_X))),
+		min(grid.y, max((int)0, (int)ceilf(py_hi / BLOCK_Y)))
+	};
+}
+
+// Build the compact bounding box (SnugBox). Returns false if the footprint
+// touches no tile (the splat can be culled).
+__forceinline__ __device__ bool buildTileBBox(
+	const float* transMat, float2 center, float2 extent,
+	float trunc_R, dim3 grid, TileBBox& bb)
+{
+	const float trunc_R2 = trunc_R * trunc_R;
+	bb.cx = center.x; bb.cy = center.y;
+	bb.R_lp = trunc_R * FilterSize;
+	bb.R_lp2 = bb.R_lp * bb.R_lp;
+
+	// rho3d(x,y) = (p.x^2 + p.y^2) / p.z^2, where p(x,y) is *linear* in the pixel:
+	//   p = x*A + y*B + Cc,  A = Tv x Tw,  B = Tw x Tu,  Cc = Tu x Tv.
+	// Hence "rho3d <= trunc_R^2" is the conic p.x^2 + p.y^2 - trunc_R^2 p.z^2 <= 0.
+	const float3 Tu = { transMat[0], transMat[1], transMat[2] };
+	const float3 Tv = { transMat[3], transMat[4], transMat[5] };
+	const float3 Tw = { transMat[6], transMat[7], transMat[8] };
+	const float3 A  = crossProduct(Tv, Tw);
+	const float3 B  = crossProduct(Tw, Tu);
+	const float3 Cc = crossProduct(Tu, Tv);
+
+	const float a = A.x * A.x + A.y * A.y - trunc_R2 * A.z * A.z;
+	const float c = B.x * B.x + B.y * B.y - trunc_R2 * B.z * B.z;
+	const float b = A.x * B.x + A.y * B.y - trunc_R2 * A.z * B.z;
+	const float d = A.x * Cc.x + A.y * Cc.y - trunc_R2 * A.z * Cc.z;
+	const float e = B.x * Cc.x + B.y * Cc.y - trunc_R2 * B.z * Cc.z;
+	const float f = Cc.x * Cc.x + Cc.y * Cc.y - trunc_R2 * Cc.z * Cc.z;
+	const float det2 = a * c - b * b;
+
+	float px_lo, px_hi, py_lo, py_hi;
+	bb.ellipse = false;
+
+	// A bounded ellipse requires a positive-definite quadratic part.
+	if (a > 0.0f && c > 0.0f && det2 > 0.0f)
+	{
+		// Tight AABB: extreme x where dQ/dy = 0, extreme y where dQ/dx = 0.
+		//   (a c - b^2) x^2 + 2(d c - b e) x + (f c - e^2) = 0
+		//   (a c - b^2) y^2 + 2(e a - b d) y + (f a - d^2) = 0
+		const float Bx = d * c - b * e, Cx = f * c - e * e;
+		const float By = e * a - b * d, Cy = f * a - d * d;
+		const float disc_x = Bx * Bx - det2 * Cx;
+		const float disc_y = By * By - det2 * Cy;
+		if (disc_x > 0.0f && disc_y > 0.0f)
+		{
+			const float sx = sqrtf(disc_x), sy = sqrtf(disc_y);
+			px_lo = (-Bx - sx) / det2; px_hi = (-Bx + sx) / det2;
+			py_lo = (-By - sy) / det2; py_hi = (-By + sy) / det2;
+
+			bb.ellipse = true;
+			bb.a = a; bb.b = b; bb.c = c; bb.d = d; bb.e = e; bb.f = f;
+			bb.x_lo = px_lo; bb.x_hi = px_hi;
+			bb.y_at_xlo = -(b * px_lo + e) / c;
+			bb.y_at_xhi = -(b * px_hi + e) / c;
+
+			// Union with the low-pass disk (matters for thin / sub-pixel splats).
+			px_lo = min(px_lo, center.x - bb.R_lp); px_hi = max(px_hi, center.x + bb.R_lp);
+			py_lo = min(py_lo, center.y - bb.R_lp); py_hi = max(py_hi, center.y + bb.R_lp);
+		}
+	}
+
+	if (!bb.ellipse)
+	{
+		// Degenerate footprint (grazing / edge-on splat): fall back to the loose
+		// square used by the original code (which already covers the disk via the
+		// FilterSize floor). Never worse than before.
+		const float r = ceilf(trunc_R * max(max(extent.x, extent.y), (float)FilterSize));
+		px_lo = center.x - r; px_hi = center.x + r;
+		py_lo = center.y - r; py_hi = center.y + r;
+	}
+
+	pixelBoxToTileRect(px_lo, px_hi, py_lo, py_hi, grid, bb.rect_min, bb.rect_max);
+	return (bb.rect_max.x > bb.rect_min.x) && (bb.rect_max.y > bb.rect_min.y);
+}
+
+// Analytic per-row tile span (AccuTile): for tile row ty, return the tile-x
+// range [x_lo, x_hi) the footprint actually intersects. No per-tile tests.
+__forceinline__ __device__ void tileRowSpanX(
+	const TileBBox& bb, uint32_t ty, dim3 grid, uint32_t& x_lo, uint32_t& x_hi)
+{
+	if (!bb.ellipse)
+	{
+		// Degenerate fallback: emit the full (already-loose) rect row.
+		x_lo = bb.rect_min.x;
+		x_hi = bb.rect_max.x;
+		return;
+	}
+
+	const float ya = (float)(ty * BLOCK_Y);
+	const float yb = (float)(ty * BLOCK_Y + BLOCK_Y);
+
+	float exlo = 1e30f, exhi = -1e30f;
+
+	// Ellipse coverage over the horizontal strip [ya, yb]. Solving Q(x,y)=0 for x
+	// at a fixed row gives a x^2 + 2(b y + d) x + (c y^2 + 2 e y + f) = 0. The
+	// extreme x over the strip is attained at a strip boundary or at the ellipse's
+	// global x-extreme (if its row lies inside the strip).
+	#pragma unroll
+	for (int it = 0; it < 2; ++it)
+	{
+		const float yy = (it == 0) ? ya : yb;
+		const float Bc = bb.b * yy + bb.d;
+		const float Cc2 = bb.c * yy * yy + 2.0f * bb.e * yy + bb.f;
+		const float disc = Bc * Bc - bb.a * Cc2;
+		if (disc >= 0.0f)
+		{
+			const float s = sqrtf(disc);
+			exlo = min(exlo, (-Bc - s) / bb.a);
+			exhi = max(exhi, (-Bc + s) / bb.a);
+		}
+	}
+	if (bb.y_at_xlo >= ya && bb.y_at_xlo <= yb) exlo = min(exlo, bb.x_lo);
+	if (bb.y_at_xhi >= ya && bb.y_at_xhi <= yb) exhi = max(exhi, bb.x_hi);
+
+	// Low-pass disk coverage over the strip.
+	const float dy = max(0.0f, max(ya - bb.cy, bb.cy - yb));
+	if (dy < bb.R_lp)
+	{
+		const float half = sqrtf(bb.R_lp2 - dy * dy);
+		exlo = min(exlo, bb.cx - half);
+		exhi = max(exhi, bb.cx + half);
+	}
+
+	if (exlo > exhi)
+	{
+		// No coverage in this row.
+		x_lo = bb.rect_min.x;
+		x_hi = bb.rect_min.x;
+		return;
+	}
+
+	int tlo = (int)(exlo / BLOCK_X);
+	int thi = (int)ceilf(exhi / BLOCK_X);
+	if (tlo < (int)bb.rect_min.x) tlo = (int)bb.rect_min.x;
+	if (thi > (int)bb.rect_max.x) thi = (int)bb.rect_max.x;
+	if (thi < tlo) thi = tlo;
+	x_lo = (uint32_t)tlo;
+	x_hi = (uint32_t)thi;
+}
+
+// Count the tiles the footprint touches: a single loop over rows with analytic
+// spans (no nested per-tile iteration).
+__forceinline__ __device__ uint32_t countTilesBBox(const TileBBox& bb, dim3 grid)
+{
+	uint32_t n = 0;
+	for (uint32_t ty = bb.rect_min.y; ty < bb.rect_max.y; ++ty)
+	{
+		uint32_t x_lo, x_hi;
+		tileRowSpanX(bb, ty, grid, x_lo, x_hi);
+		n += (x_hi - x_lo);
+	}
+	return n;
+}
+
 __forceinline__ __device__ bool in_frustum(int idx,
 	const float* orig_points,
 	const float* viewmatrix,

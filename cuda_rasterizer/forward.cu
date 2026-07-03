@@ -127,40 +127,10 @@ __device__ bool computeTransMat(const glm::vec3 &p_world, const glm::vec4 &quat,
 	return true;
 }
 
-// Computing the bounding box of the 2D Gaussian and its center,
-// where the center of the bounding box is used to create a low pass filter
-// in the image plane
-__device__ bool computeAABB(const float *transMat, float2 & center, float2 & extent) {
-	glm::mat4x3 T = glm::mat4x3(
-		transMat[0], transMat[1], transMat[2],
-		transMat[3], transMat[4], transMat[5],
-		transMat[6], transMat[7], transMat[8],
-		transMat[6], transMat[7], transMat[8]
-	);
-
-	float d = glm::dot(glm::vec3(1.0, 1.0, -1.0), T[3] * T[3]);
-	
-	if (d == 0.0f) return false;
-
-	glm::vec3 f = glm::vec3(1.0, 1.0, -1.0) * (1.0f / d);
-
-	glm::vec3 p = glm::vec3(
-		glm::dot(f, T[0] * T[3]),
-		glm::dot(f, T[1] * T[3]), 
-		glm::dot(f, T[2] * T[3]));
-	
-	glm::vec3 h0 = p * p - 
-		glm::vec3(
-			glm::dot(f, T[0] * T[0]),
-			glm::dot(f, T[1] * T[1]), 
-			glm::dot(f, T[2] * T[2])
-		);
-
-	glm::vec3 h = sqrt(max(glm::vec3(0.0), h0)) + glm::vec3(0.0, 0.0, 1e-2);
-	center = {p.x, p.y};
-	extent = {h.x, h.y};
-	return true;
-}
+// Computing the bounding box of the 2D Gaussian and its center is now shared
+// with the duplication kernel: see computeCenterExtent() and the analytic
+// SnugBox + AccuTile helpers (buildTileBBox / tileRowSpanX / countTilesBBox)
+// in auxiliary.h.
 
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
@@ -226,24 +196,21 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	//  compute center and extent
 	float2 center;
 	float2 extent;
-	ok = computeAABB(transMat, center, extent);
+	ok = computeCenterExtent(transMat, center, extent);
 	if (!ok) return;
 
-	// add the bounding of countour
-#if TIGHTBBOX // no use in the paper, but it indeed help speeds.
-	// the effective extent is now depended on the opacity of gaussian.
-	float truncated_R = sqrtf(max(9.f + logf(opacities[idx]), 0.000001));
-#else
-	float truncated_R = 3.f;
-#endif
-	float radius = ceil(truncated_R * max(max(extent.x, extent.y), FilterSize));
-
-	uint2 rect_min, rect_max;
-	getRect(center, radius, rect_min, rect_max, grid);
-	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
+	// Analytic compact bounding box (SnugBox) + exact per-row tile spans
+	// (AccuTile): bound the splat by its true screen-space conic footprint,
+	// unioned with the low-pass disk, and count only the tiles it truly touches.
+	float truncated_R = truncatedR(opacities[idx]);
+	TileBBox bbox;
+	if (!buildTileBBox(transMat, center, extent, truncated_R, grid, bbox))
+		return;
+	uint32_t n_touched = countTilesBBox(bbox, grid);
+	if (n_touched == 0)
 		return;
 
-	// compute colors 
+	// compute colors
 	if (colors_precomp == nullptr) {
 		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
 		rgb[idx * C + 0] = result.x;
@@ -253,11 +220,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// depths[idx] = p_view.z;
 	depths[idx] = glm::length(p_world - *cam_pos);
-	radii[idx] = (int)radius;
+	// Keep the original scalar radius for densification / the visibility gate.
+	radii[idx] = (int)ceil(truncated_R * max(max(extent.x, extent.y), FilterSize));
 	points_xy_image[idx] = center;
 	// store them in float4
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
-	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+	tiles_touched[idx] = n_touched;
 }
 
 // Main rasterization method. Collaboratively works on one tile per

@@ -69,8 +69,9 @@ __global__ void checkFrustum(int P,
 // Run once per Gaussian (1:N mapping).
 __global__ void duplicateWithKeys(
 	int P,
-	const float2* points_xy,
 	const float* depths,
+	const float* transMats,
+	const float4* normal_opacity,
 	const uint32_t* offsets,
 	uint64_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
@@ -86,18 +87,27 @@ __global__ void duplicateWithKeys(
 	{
 		// Find this Gaussian's offset in buffer for writing keys/values.
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
-		uint2 rect_min, rect_max;
 
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		// Rebuild the exact same analytic bounding box used to count tiles in
+		// preprocess. Identical inputs + identical inline math => identical tile
+		// set, so the emitted key count matches tiles_touched and the write
+		// offsets stay perfectly in range.
+		const float* transMat = transMats + 9 * idx;
+		float2 center, extent;
+		computeCenterExtent(transMat, center, extent);
+		float truncated_R = truncatedR(normal_opacity[idx].w);
+		TileBBox bbox;
+		buildTileBBox(transMat, center, extent, truncated_R, grid, bbox);
 
-		// For each tile that the bounding rect overlaps, emit a 
-		// key/value pair. The key is |  tile ID  |      depth      |,
-		// and the value is the ID of the Gaussian. Sorting the values 
-		// with this key yields Gaussian IDs in a list, such that they
-		// are first sorted by tile and then by depth. 
-		for (int y = rect_min.y; y < rect_max.y; y++)
+		// For each tile the footprint actually overlaps, emit a key/value pair.
+		// The key is |  tile ID  |      depth      |, the value is the Gaussian
+		// ID. Sorting by this key yields Gaussian IDs sorted first by tile, then
+		// by depth. The inner x-range is analytic (AccuTile) -- no per-tile test.
+		for (uint32_t y = bbox.rect_min.y; y < bbox.rect_max.y; y++)
 		{
-			for (int x = rect_min.x; x < rect_max.x; x++)
+			uint32_t x_lo, x_hi;
+			tileRowSpanX(bbox, y, grid, x_lo, x_hi);
+			for (uint32_t x = x_lo; x < x_hi; x++)
 			{
 				uint64_t key = y * grid.x + x;
 				key <<= 32;
@@ -285,12 +295,16 @@ int CudaRasterizer::Rasterizer::forward(
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
-	// For each instance to be rendered, produce adequate [ tile | depth ] key 
-	// and corresponding dublicated Gaussian indices to be sorted
+	// For each instance to be rendered, produce adequate [ tile | depth ] key
+	// and corresponding dublicated Gaussian indices to be sorted.
+	// duplicateWithKeys rebuilds the same analytic box as preprocess, so it needs
+	// the transMats (for the conic) and normal_opacity (for the cutoff radius).
+	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
 	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
 		P,
-		geomState.means2D,
 		geomState.depths,
+		transMat_ptr,
+		geomState.normal_opacity,
 		geomState.point_offsets,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
@@ -320,7 +334,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
-	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
+	// transMat_ptr was resolved above (reused for the render pass).
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
