@@ -14,6 +14,7 @@
 #include <fstream>
 #include <algorithm>
 #include <numeric>
+#include <cstdint>
 #include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -137,6 +138,19 @@ __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* rang
 		ranges[currtile].y = L;
 }
 
+__global__ void maskTileRanges(int N, const uint8_t* mask, uint2* ranges)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= N)
+		return;
+
+	if (mask[idx] == 0)
+	{
+		ranges[idx].x = 0;
+		ranges[idx].y = 0;
+	}
+}
+
 // Mark Gaussians as visible/invisible, based on view frustum testing
 void CudaRasterizer::Rasterizer::markVisible(
 	int P,
@@ -219,6 +233,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_color,
 	float* out_others,
 	int* radii,
+	const uint8_t* tile_mask,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -318,6 +333,16 @@ int CudaRasterizer::Rasterizer::forward(
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);
+	CHECK_CUDA(, debug)
+
+	if (tile_mask != nullptr && num_rendered > 0)
+	{
+		const int total_tiles = tile_grid.x * tile_grid.y;
+		maskTileRanges << <(total_tiles + 255) / 256, 256 >> > (
+			total_tiles,
+			tile_mask,
+			imgState.ranges);
+	}
 	CHECK_CUDA(, debug)
 
 	// Let each tile blend its range of Gaussians independently in parallel

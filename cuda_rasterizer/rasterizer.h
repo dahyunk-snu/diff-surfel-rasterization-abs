@@ -14,6 +14,7 @@
 
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 namespace CudaRasterizer
 {
@@ -52,6 +53,7 @@ namespace CudaRasterizer
 			float* out_color,
 			float* out_others,
 			int* radii = nullptr,
+			const uint8_t* tile_mask = nullptr,
 			bool debug = false);
 
 		static void backward(

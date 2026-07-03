@@ -33,6 +33,7 @@ RasterizeGaussiansCUDA(
 	const float cy,
 	const int image_height,
 	const int image_width,
+	const torch::Tensor& tile_mask,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
