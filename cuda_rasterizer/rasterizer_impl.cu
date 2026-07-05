@@ -76,7 +76,8 @@ __global__ void duplicateWithKeys(
 	uint64_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
 	int* radii,
-	dim3 grid)
+	dim3 grid,
+	const uint8_t* tile_mask)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -100,6 +101,9 @@ __global__ void duplicateWithKeys(
 		{
 			for (int x = rect_min.x; x < rect_max.x; x++)
 			{
+				if (tile_mask != nullptr && tile_mask[y * grid.x + x] == 0)
+					continue;
+
 				uint64_t key = y * grid.x + x;
 				key <<= 32;
 				key |= *((uint32_t*)&depths[idx]);
@@ -136,19 +140,6 @@ __global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* rang
 	}
 	if (idx == L - 1)
 		ranges[currtile].y = L;
-}
-
-__global__ void maskTileRanges(int N, const uint8_t* mask, uint2* ranges)
-{
-	auto idx = cg::this_grid().thread_rank();
-	if (idx >= N)
-		return;
-
-	if (mask[idx] == 0)
-	{
-		ranges[idx].x = 0;
-		ranges[idx].y = 0;
-	}
 }
 
 // Mark Gaussians as visible/invisible, based on view frustum testing
@@ -286,6 +277,7 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.rgb,
 		geomState.normal_opacity,
 		tile_grid,
+		tile_mask,
 		geomState.tiles_touched,
 		prefiltered
 	), debug)
@@ -312,7 +304,8 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
 		radii,
-		tile_grid)
+		tile_grid,
+		tile_mask)
 	CHECK_CUDA(, debug)
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -333,16 +326,6 @@ int CudaRasterizer::Rasterizer::forward(
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);
-	CHECK_CUDA(, debug)
-
-	if (tile_mask != nullptr && num_rendered > 0)
-	{
-		const int total_tiles = tile_grid.x * tile_grid.y;
-		maskTileRanges << <(total_tiles + 255) / 256, 256 >> > (
-			total_tiles,
-			tile_mask,
-			imgState.ranges);
-	}
 	CHECK_CUDA(, debug)
 
 	// Let each tile blend its range of Gaussians independently in parallel

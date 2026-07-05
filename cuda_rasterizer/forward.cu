@@ -188,6 +188,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* rgb,
 	float4* normal_opacity,
 	const dim3 grid,
+	const uint8_t* tile_mask,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
@@ -258,7 +259,23 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	points_xy_image[idx] = center;
 	// store them in float4
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
-	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+	if (tile_mask == nullptr)
+	{
+		tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+	}
+	else
+	{
+		uint32_t selected_tiles = 0;
+		for (int y = rect_min.y; y < rect_max.y; y++)
+		{
+			for (int x = rect_min.x; x < rect_max.x; x++)
+			{
+				if (tile_mask[y * grid.x + x] != 0)
+					selected_tiles++;
+			}
+		}
+		tiles_touched[idx] = selected_tiles;
+	}
 }
 
 // Main rasterization method. Collaboratively works on one tile per
@@ -523,6 +540,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* rgb,
 	float4* normal_opacity,
 	const dim3 grid,
+	const uint8_t* tile_mask,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
@@ -551,6 +569,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		rgb,
 		normal_opacity,
 		grid,
+		tile_mask,
 		tiles_touched,
 		prefiltered
 		);

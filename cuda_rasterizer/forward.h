@@ -12,6 +12,7 @@
 #ifndef CUDA_RASTERIZER_FORWARD_H_INCLUDED
 #define CUDA_RASTERIZER_FORWARD_H_INCLUDED
 
+#include <cstdint>
 #include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -47,6 +48,7 @@ namespace FORWARD
 		float* colors,
 		float4* normal_opacity,
 		const dim3 grid,
+		const uint8_t* tile_mask,
 		uint32_t* tiles_touched,
 		bool prefiltered);
 
