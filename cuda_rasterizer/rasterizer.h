@@ -89,6 +89,7 @@ namespace CudaRasterizer
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
+			const uint8_t* tile_mask,
 			bool debug);
 	};
 };

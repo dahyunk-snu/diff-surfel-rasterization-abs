@@ -286,6 +286,7 @@ __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
+	const uint8_t* __restrict__ tile_mask,
 	int W, int H,
 	float focal_x, float focal_y,
 	const float2* __restrict__ points_xy_image,
@@ -302,6 +303,10 @@ renderCUDA(
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
 	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	uint32_t tile_id = block.group_index().y * horizontal_blocks + block.group_index().x;
+	if (tile_mask != nullptr && tile_mask[tile_id] == 0)
+		return;
+
 	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
 	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
@@ -314,7 +319,7 @@ renderCUDA(
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
-	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	uint2 range = ranges[tile_id];
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 	int toDo = range.y - range.x;
 
@@ -486,6 +491,7 @@ void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
+	const uint8_t* tile_mask,
 	int W, int H,
 	float focal_x, float focal_y,
 	const float2* means2D,
@@ -502,6 +508,7 @@ void FORWARD::render(
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
+		tile_mask,
 		W, H,
 		focal_x, focal_y,
 		means2D,

@@ -335,6 +335,7 @@ int CudaRasterizer::Rasterizer::forward(
 		tile_grid, block,
 		imgState.ranges,
 		binningState.point_list,
+		tile_mask,
 		width, height,
 		focal_x, focal_y,
 		geomState.means2D,
@@ -386,6 +387,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
+	const uint8_t* tile_mask,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -414,6 +416,7 @@ void CudaRasterizer::Rasterizer::backward(
 		block,
 		imgState.ranges,
 		binningState.point_list,
+		tile_mask,
 		width, height,
 		focal_x, focal_y,
 		background,

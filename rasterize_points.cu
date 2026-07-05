@@ -188,6 +188,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const torch::Tensor& tile_mask,
 	const bool debug) 
 {
 
@@ -211,6 +212,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   const int P = means3D.size(0);
   const int H = dL_dout_color.size(1);
   const int W = dL_dout_color.size(2);
+  const int tiles_x = (W + BLOCK_X - 1) / BLOCK_X;
+  const int tiles_y = (H + BLOCK_Y - 1) / BLOCK_Y;
+  const int expected_tiles = tiles_x * tiles_y;
+  torch::Tensor tile_mask_contig;
+  const uint8_t* tile_mask_ptr = nullptr;
+
+  if (tile_mask.numel() > 0)
+  {
+	TORCH_CHECK(tile_mask.dtype() == torch::kUInt8, "tile_mask must be a uint8 tensor");
+	TORCH_CHECK(tile_mask.is_cuda(), "tile_mask must be a CUDA tensor");
+	TORCH_CHECK(tile_mask.numel() == expected_tiles, "tile_mask must have one entry per 16x16 tile");
+	tile_mask_contig = tile_mask.contiguous();
+	tile_mask_ptr = tile_mask_contig.data_ptr<uint8_t>();
+  }
   
   int M = 0;
   if(sh.size(0) != 0)
@@ -264,6 +279,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dsh.contiguous().data<float>(),
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
+	  tile_mask_ptr,
 	  debug);
   }
 

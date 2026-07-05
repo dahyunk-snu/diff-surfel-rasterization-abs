@@ -57,6 +57,7 @@ namespace FORWARD
 		const dim3 grid, dim3 block,
 		const uint2* ranges,
 		const uint32_t* point_list,
+		const uint8_t* tile_mask,
 		int W, int H,
 		float focal_x, float focal_y,
 		const float2* points_xy_image,
