@@ -210,6 +210,39 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float4 intrins = {focal_x, focal_y, cx, cy};
 	glm::vec2 scale = scales[idx];
 	glm::vec4 quat = rotations[idx];
+
+	// Reject Gaussians that cannot touch any selected tile
+	// before the expensive transform/AABB/SH work.
+	if (tile_mask != nullptr)
+	{
+		const float z = p_view.z;
+		const float Rw = 3.0f * max(scale.x, scale.y);
+		if (z > Rw)
+		{
+			const float focal_max = max(focal_x, focal_y);
+			const float r_cons = focal_max * Rw / (z - Rw) + (float)BLOCK_X;
+			const float2 c_cons = {
+				focal_x * p_view.x / z + cx,
+				focal_y * p_view.y / z + cy
+			};
+			uint2 pr_min, pr_max;
+			getRect(c_cons, (int)ceil(r_cons), pr_min, pr_max, grid);
+			bool any_sel = false;
+			for (uint32_t y = pr_min.y; y < pr_max.y && !any_sel; y++)
+			{
+				for (uint32_t x = pr_min.x; x < pr_max.x; x++)
+				{
+					if (tile_mask[y * grid.x + x] != 0)
+					{
+						any_sel = true;
+						break;
+					}
+				}
+			}
+			if (!any_sel)
+				return;
+		}
+	}
 	
 	const float* transMat;
 	bool ok;
@@ -245,6 +278,22 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
 		return;
 
+	// Exact selective-tile test. Keep this as the semantic gate for masked rendering.
+	uint32_t selected_tiles = 0;
+	if (tile_mask != nullptr)
+	{
+		for (uint32_t y = rect_min.y; y < rect_max.y; y++)
+		{
+			for (uint32_t x = rect_min.x; x < rect_max.x; x++)
+			{
+				if (tile_mask[y * grid.x + x] != 0)
+					selected_tiles++;
+			}
+		}
+		if (selected_tiles == 0)
+			return;
+	}
+
 	// compute colors 
 	if (colors_precomp == nullptr) {
 		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
@@ -259,29 +308,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	points_xy_image[idx] = center;
 	// store them in float4
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
-	// conunt tiles that are selected by the tile mask
-	if (tile_mask == nullptr)
-	{
-		tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
-	}
-	else
-	{
-		uint32_t selected_tiles = 0;
-		for (int y = rect_min.y; y < rect_max.y; y++)
-		{
-			for (int x = rect_min.x; x < rect_max.x; x++)
-			{
-				if (tile_mask[y * grid.x + x] != 0)
-					selected_tiles++;
-			}
-		}
-		if (selected_tiles == 0)
-		{
-			radii[idx] = 0;
-			return;
-		}
-		tiles_touched[idx] = selected_tiles;
-	}
+	tiles_touched[idx] = (tile_mask == nullptr) ?
+		(uint32_t)((rect_max.y - rect_min.y) * (rect_max.x - rect_min.x)) :
+		selected_tiles;
 }
 
 // Main rasterization method. Collaboratively works on one tile per
