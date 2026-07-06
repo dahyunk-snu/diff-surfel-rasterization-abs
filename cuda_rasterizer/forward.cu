@@ -259,6 +259,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	points_xy_image[idx] = center;
 	// store them in float4
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
+	// conunt tiles that are selected by the tile mask
 	if (tile_mask == nullptr)
 	{
 		tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
@@ -273,6 +274,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 				if (tile_mask[y * grid.x + x] != 0)
 					selected_tiles++;
 			}
+		}
+		if (selected_tiles == 0)
+		{
+			radii[idx] = 0;
+			return;
 		}
 		tiles_touched[idx] = selected_tiles;
 	}
